@@ -1,2 +1,91 @@
-this is abc file
-it is sahihtis file
+#extract pdfs
+import fitz  # pymupdf
+
+def extract_text_from_pdf(pdf_path):
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    return text
+
+def chunk_text(text, chunk_size=500, overlap=50):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i:i+chunk_size])
+        chunks.append(chunk)
+    return chunks
+
+#Get Embeddings from Titan
+import boto3, json
+
+bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
+
+def get_titan_embedding(text: str, dimension: int = 512, normalize: bool = True):
+    response = bedrock.invoke_model(
+        modelId="amazon.titan-embed-text-v2:0",
+        body=json.dumps({
+            "inputText": text,
+            "dimensions": dimension,
+            "normalize": normalize
+        }),
+        accept="application/json",
+        contentType="application/json"
+    )
+    result = json.loads(response["body"].read())
+    return result["embedding"]
+
+#Build Vector DB with FAISS
+import faiss
+import numpy as np
+
+# Load KB PDFs
+schema_text = extract_text_from_pdf("schema.pdf")
+app_text = extract_text_from_pdf("application.pdf")
+
+# Chunk them
+schema_chunks = chunk_text(schema_text)
+app_chunks = chunk_text(app_text)
+
+# Combine all KB chunks
+kb_chunks = schema_chunks + app_chunks
+
+# Embed all chunks
+embeddings = [get_titan_embedding(c) for c in kb_chunks]
+
+# Convert to numpy for FAISS
+embeddings_np = np.array(embeddings).astype("float32")
+
+# Build FAISS index
+dim = embeddings_np.shape[1]
+index = faiss.IndexFlatL2(dim)
+index.add(embeddings_np)
+
+print(f"Stored {len(kb_chunks)} chunks in FAISS index.")
+
+Step 4: Query the KB
+def query_kb(user_query, top_k=3):
+    query_vec = np.array([get_titan_embedding(user_query)]).astype("float32")
+    D, I = index.search(query_vec, top_k)
+    results = [kb_chunks[idx] for idx in I[0]]
+    return results
+
+# Example query
+query = "Why is my PostgreSQL connection failing?"
+results = query_kb(query)
+
+print("🔹 Top Relevant Chunks:")
+for r in results:
+    print("------")
+    print(r)
+What You Have Now
+
+PDF KB (schema + app docs) → converted into embeddings + stored in FAISS.
+
+User query → embedded → compared with KB.
+
+Returns most relevant KB chunks that relate to the error/query.
+
+👉 Next step after this would be:
+
+Take these retrieved chunks + the error → send them into Claude on Bedrock to generate a conclusion/fix.
