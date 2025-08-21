@@ -1,0 +1,111 @@
+import boto3
+import faiss
+import numpy as np
+from typing import List
+
+# ---------------------------
+# Step 1: Load and prepare KB
+# ---------------------------
+
+def load_text_files(file_paths: List[str]) -> str:
+    """Read multiple text files and return their combined content."""
+    combined_text = ""
+    for file in file_paths:
+        with open(file, "r", encoding="utf-8") as f:
+            combined_text += f.read() + "\n"
+    return combined_text
+
+def chunk_text(text: str, chunk_size=500, overlap=100) -> List[str]:
+    """Split text into overlapping chunks."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start += chunk_size - overlap
+    return chunks
+
+# ---------------------------
+# Step 2: Titan Embeddings
+# ---------------------------
+
+def get_embedding(text: str, client) -> List[float]:
+    """Call AWS Bedrock Titan Embedding model."""
+    body = {"inputText": text}
+    response = client.invoke_model(
+        modelId="amazon.titan-embed-text-v2:0",  # Titan v2 recommended
+        body=str(body),
+        accept="application/json",
+        contentType="application/json"
+    )
+    response_body = eval(response["body"].read().decode("utf-8"))  # convert JSON string to dict
+    return response_body["embedding"]
+
+# ---------------------------
+# Step 3: Build FAISS index
+# ---------------------------
+
+def build_faiss_index(chunks: List[str], client):
+    """Create FAISS index from text chunks."""
+    embeddings = [get_embedding(chunk, client) for chunk in chunks]
+    embeddings = np.array(embeddings).astype("float32")
+
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatIP(dimension)  # Cosine similarity (via inner product)
+    
+    # Normalize vectors for cosine similarity
+    faiss.normalize_L2(embeddings)
+    index.add(embeddings)
+
+    return index, chunks
+
+# ---------------------------
+# Step 4: Query FAISS index
+# ---------------------------
+
+def search_index(query: str, client, index, chunks, top_k=3):
+    """Search FAISS index using query embeddings."""
+    query_embedding = np.array([get_embedding(query, client)]).astype("float32")
+    faiss.normalize_L2(query_embedding)  # normalize query vector
+
+    distances, indices = index.search(query_embedding, top_k)
+
+    results = []
+    for i, idx in enumerate(indices[0]):
+        results.append({
+            "chunk": chunks[idx],
+            "score": float(distances[0][i])
+        })
+    return results
+
+# ---------------------------
+# Main Workflow
+# ---------------------------
+
+if __name__ == "__main__":
+    # 1. Initialize AWS Bedrock client
+    bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+
+    # 2. Load KB from text files
+    kb_files = ["schema.txt", "application.txt"]  # your files
+    kb_text = load_text_files(kb_files)
+
+    # 3. Split into chunks
+    chunks = chunk_text(kb_text, chunk_size=500, overlap=100)
+
+    # 4. Build FAISS index
+    print("Building FAISS index...")
+    index, chunks = build_faiss_index(chunks, bedrock)
+
+    # 5. User Query
+    user_query = "What could be causing database connection issues?"
+    print(f"\n🔎 Query: {user_query}\n")
+
+    results = search_index(user_query, bedrock, index, chunks, top_k=3)
+
+    # 6. Show results
+    print("Top results:")
+    for res in results:
+        print(f"- Score: {res['score']:.4f}")
+        print(f"  Text: {res['chunk'][:200]}...\n")
